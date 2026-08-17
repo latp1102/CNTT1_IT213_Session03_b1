@@ -1,0 +1,111 @@
+BÀI 2: ĐỌC HIỂU & DÒ LỖI — ENDPOINT STREAM "GIẢ SSE"
+
+I. NGUYÊN NHÂN LỖI CỐT LÕI
+
+Đoạn code gốc:
+@GetMapping("/api/v1/ai/stream")
+public Flux<String> getStreamResponse(@RequestParam String message) {
+    return chatModel.stream(new Prompt(message))
+            .map(response -> response.getResult().getOutput().getText());
+}
+
+Lỗi chính:
+1. THIẾU produces = MediaType.TEXT_EVENT_STREAM_VALUE trong @GetMapping.
+   Khi không khai báo, Spring MVC mặc định produces = application/json.
+   Với kiểu trả về Flux<String> kiểu JSON, Spring dùng cơ chế
+   MapFluxToIterable: nó chờ subscribe hết cả stream (toàn bộ 20 giây LLM
+   sinh text) rồi mới serialize thành một mảng JSON và gửi về trong một
+   response duy nhất.
+   => Client "nhận toàn bộ cùng một lúc" (blocking) chứ không nhận chữ
+   về dần như SSE.
+
+2. Lỗi phụ dễ gây NPE chặn stream: response.getResult().getOutput()
+   .getText() có thể trả về null ở một số chunk (chunk trống, chunk meta,
+   token đầu chỉ chứa metadata). Nếu chỉ map raw như code gốc, gặp chunk
+   null sẽ ném NullPointerException làm đứt stream.
+
+II. PROMPT GỬI AI (đóng vai Senior Java Developer)
+
+VAI TRÒ:
+Bạn là Senior Java Developer chuyên về Spring Boot và Spring WebFlux,
+làm việc tại công ty vận tải R-Logistics. Nhiệm vụ của bạn là rà soát
+code để tìm ra lỗi khiến Stream API bị blocking.
+
+NGỮ CẢNH:
+Chúng tôi xây dựng chatbot tra cứu quy trình thông quan. Vì câu trả lời
+LLM dài 15-20 giây, chúng tôi dùng Spring AI ChatModel.stream() kết hợp
+Server-Sent Events (SSE) để trả chữ về dần cho client. Nhưng client hiện
+vẫn phải chờ đủ 20 giây mới nhận được toàn bộ response một lần, không
+thấy chữ hiện dần từng token.
+
+ĐOẠN CODE HIỆN TẠI:
+@GetMapping("/api/v1/ai/stream")
+public Flux<String> getStreamResponse(@RequestParam String message) {
+    return chatModel.stream(new Prompt(message))
+            .map(response -> response.getResult().getOutput().getText());
+}
+
+YÊU CẦU PHÂN TÍCH:
+1. Chỉ ra NGUYÊN NHÂN GỐC khiến endpoint hoạt động như REST chặn đồng
+   bộ thay vì SSE stream (soi kỹ annotation @GetMapping, kiểu trả về
+   Flux, cơ chế serialization của Spring MVC).
+2. Chỉ ra các lỗi tiềm ẩn khác: chunk trả về null/trống, nguy cơ NPE.
+3. Đề xuất giải pháp sửa: ghi rõ vai trò của produces
+   = TEXT_EVENT_STREAM_VALUE và cách lọc chunk rỗng/trả text an toàn.
+4. Cung cấp đoạn Controller hoàn chỉnh sau khi sửa, kèm giải thích
+   ngắn gọn từng thay đổi.
+
+RÀNG BUỘC TRẢ LỜI:
+Trả lời ngắn gọn, dễ hiểu, đúng thứ tự 4 mục trên. Không dài dòng.
+
+III. CONTROLLER SAU KHI SỬA VÀ TỐI ƯU (đúng SSE)
+
+import org.springframework.ai.chat.model.Generation;
+import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.http.MediaType;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import reactor.core.publisher.Flux;
+
+@RestController
+@RequestMapping("/api/v1/ai")
+public class AiStreamController {
+
+    private final ChatModel chatModel;
+
+    public AiStreamController(ChatModel chatModel) {
+        this.chatModel = chatModel;
+    }
+
+    @GetMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<String> getStreamResponse(@RequestParam String message) {
+        return chatModel.stream(new Prompt(message))
+                .map(response -> {
+                    Generation result = response.getResult();
+                    String text = (result != null && result.getOutput() != null)
+                            ? result.getOutput().getText()
+                            : "";
+                    return text != null ? text : "";
+                })
+                .filter(text -> !text.isBlank());
+    }
+}
+
+GIẢI THÍCH TỪNG THAY ĐỔI:
+1. produces = MediaType.TEXT_EVENT_STREAM_VALUE: buộc Spring viết mỗi
+   phần tử của Flux thành một event SSE (data: ...) đẩy ngay về client
+   khi dữ liệu tới, không đợi stream kết thúc. Đây là thay đổi quyết
+   định biến endpoint thành stream thực thụ.
+2. Kiểm tra null ở result/output/text: tránh NPE ở các chunk trống hoặc
+   chunk meta, không làm đứt stream.
+3. .filter(text -> !text.isBlank()): bỏ chunk rỗng, client chỉ nhận chữ
+   có nội dung, tránh spam event trống.
+
+KẾT LUẬN:
+Chỉ thiếu đúng một khai báo produces là endpoint vẫn đang bị Spring
+serialize thành JSON array chờ toàn bộ stream. Chỉnh produces thành
+TEXT_EVENT_STREAM_VALUE kết hợp xử lý an toàn chunk rỗng là endpoint
+chạy đúng SSE, client nhận chữ về dần từng token.
